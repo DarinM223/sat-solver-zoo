@@ -106,27 +106,16 @@ impl IndexMut<ClauseIndex> for Clauses {
     }
 }
 
-pub enum Reason {
-    Conflict(ClauseIndex),
-    Unresolved,
-}
-
 pub struct Formula {
     clauses: Clauses,
     vars: HashSet<Var>,
-}
-
-impl Formula {
-    pub fn unit_propagate(&self, assignments: &mut Assignments) -> Reason {
-        Reason::Unresolved
-    }
 }
 
 #[derive(Default)]
 pub struct Assignments {
     curr_decision_level: u32,
     values: Vec<Option<bool>>,
-    antecedents: Vec<Option<Clause>>,
+    antecedents: Vec<Option<ClauseIndex>>,
     decision_levels: Vec<Option<u32>>,
 }
 
@@ -139,7 +128,7 @@ impl Assignments {
         }
     }
 
-    pub fn assign(&mut self, Var(var): Var, value: bool, antecedent: Option<Clause>) {
+    pub fn assign(&mut self, Var(var): Var, value: bool, antecedent: Option<ClauseIndex>) {
         self.values[var] = Some(value);
         self.antecedents[var] = antecedent;
         self.decision_levels[var] = Some(self.curr_decision_level);
@@ -157,4 +146,34 @@ impl Assignments {
             .iter()
             .all(|clause| clause.lits.iter().any(|lit| self.value(*lit) == Some(true)))
     }
+}
+
+pub enum Reason {
+    Conflict(ClauseIndex),
+    Unresolved,
+}
+
+pub fn unit_propagation(formula: &Formula, assignments: &mut Assignments) -> Reason {
+    // finish is set to true when no unit and conflict clause is found.
+    let mut finish = false;
+    while !finish {
+        finish = true;
+        for (clause_idx, clause) in formula.clauses.iter().enumerate() {
+            let clause_idx = ClauseIndex(clause_idx);
+            match clause.status(assignments) {
+                ClauseStatus::Unresolved | ClauseStatus::Satisfied => continue,
+                ClauseStatus::Unit => {
+                    let lit = clause
+                        .lits
+                        .iter()
+                        .find(|lit| assignments.values[lit.var.0].is_none())
+                        .unwrap();
+                    assignments.assign(lit.var, !lit.neg, Some(clause_idx));
+                    finish = false;
+                }
+                ClauseStatus::Unsatisfied => return Reason::Conflict(clause_idx),
+            }
+        }
+    }
+    Reason::Unresolved
 }
