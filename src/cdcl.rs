@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fmt::Display,
     ops::{Index, IndexMut},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Var(usize);
 
 impl Display for Var {
@@ -13,7 +13,7 @@ impl Display for Var {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Lit {
     pub var: Var,
     pub neg: bool,
@@ -52,8 +52,9 @@ pub enum ClauseStatus {
     Unresolved,
 }
 
+#[derive(Clone)]
 pub struct Clause {
-    lits: Vec<Lit>,
+    lits: HashSet<Lit>,
 }
 
 impl Clause {
@@ -78,11 +79,20 @@ impl Clause {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ClauseIndex(usize);
 
 pub struct Clauses(Vec<Clause>);
 
 impl Clauses {
+    pub fn get(&self, ClauseIndex(i): ClauseIndex) -> Option<&Clause> {
+        self.0.get(i)
+    }
+
+    pub fn get_mut(&mut self, ClauseIndex(i): ClauseIndex) -> Option<&mut Clause> {
+        self.0.get_mut(i)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Clause> {
         self.0.iter()
     }
@@ -134,6 +144,14 @@ impl Assignments {
         self.decision_levels[var] = Some(self.curr_decision_level);
     }
 
+    pub fn decision_level(&self, Var(var): Var) -> Option<u32> {
+        self.decision_levels[var]
+    }
+
+    pub fn antecedent(&self, Var(var): Var) -> Option<ClauseIndex> {
+        self.antecedents[var]
+    }
+
     pub fn unassign(&mut self, Var(var): Var) {
         self.values[var] = None;
         self.antecedents[var] = None;
@@ -176,4 +194,47 @@ pub fn unit_propagation(formula: &Formula, assignments: &mut Assignments) -> Rea
         }
     }
     Reason::Unresolved
+}
+
+pub fn resolve(a: &Clause, b: &Clause, var: Var) -> Clause {
+    // `|` is set union, `-` is set difference
+    Clause {
+        lits: &(&a.lits | &b.lits)
+            - &HashSet::from([Lit { var, neg: true }, Lit { var, neg: false }]),
+    }
+}
+
+/// Returns backtrack level and resolved clause.
+pub fn conflict_analysis(
+    formula: &Formula,
+    clause: &Clause,
+    assignments: &Assignments,
+) -> Option<(u32, Clause)> {
+    if assignments.curr_decision_level == 0 {
+        return None;
+    }
+    let only_curr_decision_level =
+        |lit: &&Lit| assignments.decision_level(lit.var) == Some(assignments.curr_decision_level);
+
+    let mut clause = clause.clone();
+    let mut literals = clause.lits.iter().filter(only_curr_decision_level);
+    while literals.clone().count() != 1 {
+        let lit = literals
+            .find(|lit| assignments.antecedent(lit.var).is_some())
+            .expect("Couldn't find a variable in the current decision level with an antecedent");
+        let antecedent = assignments.antecedent(lit.var).unwrap();
+        clause = resolve(&clause, formula.clauses.get(antecedent).unwrap(), lit.var);
+        literals = clause.lits.iter().filter(only_curr_decision_level);
+    }
+
+    let decision_levels = clause
+        .lits
+        .iter()
+        .flat_map(|lit| assignments.decision_level(lit.var))
+        .collect::<BTreeSet<_>>();
+    if decision_levels.len() <= 1 {
+        Some((0, clause))
+    } else {
+        unimplemented!()
+    }
 }
