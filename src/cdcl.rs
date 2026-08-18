@@ -1,5 +1,6 @@
+use rand::seq::IteratorRandom;
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     fmt::Display,
     ops::{Index, IndexMut},
 };
@@ -121,8 +122,31 @@ pub struct Formula {
     vars: HashSet<Var>,
 }
 
+impl Formula {
+    pub fn add_learnt_clause(&mut self, clause: Clause) {
+        self.clauses.0.push(clause);
+    }
+
+    pub fn all_variables_assigned(&self, assignments: &Assignments) -> bool {
+        self.vars.len() == assignments.num_assigned_vars()
+    }
+
+    pub fn pick_branching_variable(&self, assignments: &Assignments) -> (Var, bool) {
+        let mut rng = rand::rng();
+        let var = self
+            .vars
+            .iter()
+            .filter(|&&var| !assignments.contains_var(var))
+            .choose(&mut rng)
+            .expect("No unassigned variable");
+        let val = rand::random_bool(0.5);
+        (*var, val)
+    }
+}
+
 #[derive(Default)]
 pub struct Assignments {
+    len: usize,
     curr_decision_level: u32,
     values: Vec<Option<bool>>,
     antecedents: Vec<Option<ClauseIndex>>,
@@ -130,6 +154,14 @@ pub struct Assignments {
 }
 
 impl Assignments {
+    pub fn num_assigned_vars(&self) -> usize {
+        self.len
+    }
+
+    pub fn contains_var(&self, var: Var) -> bool {
+        self.values[var.0].is_some()
+    }
+
     pub fn value(&self, lit: Lit) -> Option<bool> {
         if lit.neg {
             self.values[lit.var.0].map(std::ops::Not::not)
@@ -139,6 +171,9 @@ impl Assignments {
     }
 
     pub fn assign(&mut self, Var(var): Var, value: bool, antecedent: Option<ClauseIndex>) {
+        if self.values[var].is_none() {
+            self.len += 1;
+        }
         self.values[var] = Some(value);
         self.antecedents[var] = antecedent;
         self.decision_levels[var] = Some(self.curr_decision_level);
@@ -153,6 +188,9 @@ impl Assignments {
     }
 
     pub fn unassign(&mut self, Var(var): Var) {
+        if self.values[var].is_some() {
+            self.len -= 1;
+        }
         self.values[var] = None;
         self.antecedents[var] = None;
         self.decision_levels[var] = None;
@@ -163,6 +201,24 @@ impl Assignments {
             .clauses
             .iter()
             .all(|clause| clause.lits.iter().any(|lit| self.value(*lit) == Some(true)))
+    }
+
+    pub fn backtrack(&mut self, level: u32) {
+        for i in 0..self.decision_levels.len() {
+            if let Some(decision_level) = self.decision_levels[i]
+                && decision_level > level
+            {
+                self.unassign(Var(i));
+            }
+        }
+    }
+}
+
+pub fn cdcl_solve(formula: &Formula) -> Option<Assignments> {
+    let mut assignments = Assignments::default();
+    match unit_propagation(formula, &mut assignments) {
+        Reason::Conflict(_) => None,
+        Reason::Unresolved => todo!(),
     }
 }
 
@@ -227,14 +283,15 @@ pub fn conflict_analysis(
         literals = clause.lits.iter().filter(only_curr_decision_level);
     }
 
-    let decision_levels = clause
+    let mut decision_levels = clause
         .lits
         .iter()
         .flat_map(|lit| assignments.decision_level(lit.var))
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
+    decision_levels.sort();
     if decision_levels.len() <= 1 {
         Some((0, clause))
     } else {
-        unimplemented!()
+        Some((decision_levels[decision_levels.len() - 2], clause))
     }
 }
