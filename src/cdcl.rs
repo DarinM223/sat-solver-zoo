@@ -2,6 +2,7 @@ use rand::seq::IteratorRandom;
 use std::{
     collections::HashSet,
     fmt::Display,
+    hash::Hash,
     ops::{Index, IndexMut},
 };
 
@@ -21,18 +22,22 @@ pub struct Lit {
 }
 
 impl Lit {
-    fn from_int(i: i32) -> Self {
+    pub fn from_int(i: i32) -> Self {
         Lit {
             var: Var(i.unsigned_abs() as usize),
             neg: i.is_negative(),
         }
     }
 
-    fn neg(&self) -> Self {
+    pub fn neg(&self) -> Self {
         Lit {
             var: self.var,
             neg: !self.neg,
         }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.var.0 == 0
     }
 }
 
@@ -53,7 +58,7 @@ pub enum ClauseStatus {
     Unresolved,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Clause {
     lits: HashSet<Lit>,
 }
@@ -83,9 +88,22 @@ impl Clause {
 #[derive(Clone, Copy)]
 pub struct ClauseIndex(usize);
 
+#[derive(Default)]
 pub struct Clauses(Vec<Clause>);
 
 impl Clauses {
+    pub fn push(&mut self, clause: Clause) {
+        self.0.push(clause);
+    }
+
+    pub fn last(&self) -> Option<&Clause> {
+        self.0.last()
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut Clause> {
+        self.0.last_mut()
+    }
+
     pub fn get(&self, ClauseIndex(i): ClauseIndex) -> Option<&Clause> {
         self.0.get(i)
     }
@@ -117,12 +135,38 @@ impl IndexMut<ClauseIndex> for Clauses {
     }
 }
 
+#[derive(Default)]
 pub struct Formula {
     clauses: Clauses,
     vars: HashSet<Var>,
 }
 
 impl Formula {
+    pub fn from_dimacs_cnf(content: &str) -> Self {
+        let mut clauses = Clauses::default();
+        for line in content.lines() {
+            let mut tokens = line.split_ascii_whitespace().peekable();
+            // Ignore empty lines or lines starting with 'p' or 'c'.
+            if let None | Some(&"p" | &"c") = tokens.peek() {
+                continue;
+            }
+            for token in tokens {
+                let token = token.parse::<i32>().expect("Expected integer literal");
+                let lit = Lit::from_int(token);
+                if lit.is_zero() {
+                    clauses.push(Clause::default()); // 0 ends a clause in DIMACS CNF.
+                } else if let Some(ref mut last) = clauses.last_mut() {
+                    last.lits.insert(lit);
+                }
+            }
+        }
+
+        Formula {
+            clauses,
+            ..Default::default()
+        }
+    }
+
     pub fn add_learnt_clause(&mut self, clause: Clause) {
         self.clauses.0.push(clause);
     }
@@ -214,12 +258,32 @@ impl Assignments {
     }
 }
 
-pub fn cdcl_solve(formula: &Formula) -> Option<Assignments> {
+pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
     let mut assignments = Assignments::default();
     match unit_propagation(formula, &mut assignments) {
-        Reason::Conflict(_) => None,
-        Reason::Unresolved => todo!(),
+        Reason::Conflict(_) => return None,
+        Reason::Unresolved => {}
+    };
+
+    while !formula.all_variables_assigned(&assignments) {
+        let (var, val) = formula.pick_branching_variable(&assignments);
+        assignments.curr_decision_level += 1;
+        assignments.assign(var, val, None);
+        loop {
+            let clause = match unit_propagation(formula, &mut assignments) {
+                Reason::Conflict(clause_index) => clause_index,
+                Reason::Unresolved => break,
+            };
+
+            let (backtrack_level, clause) =
+                conflict_analysis(formula, formula.clauses.get(clause).unwrap(), &assignments)?;
+            formula.add_learnt_clause(clause);
+            assignments.backtrack(backtrack_level);
+            assignments.curr_decision_level = backtrack_level;
+        }
     }
+
+    Some(assignments)
 }
 
 pub enum Reason {
