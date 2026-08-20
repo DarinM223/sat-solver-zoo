@@ -6,7 +6,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Var(usize);
 
 impl Display for Var {
@@ -142,6 +142,16 @@ pub struct Formula {
 }
 
 impl Formula {
+    pub fn new(clauses: Clauses) -> Self {
+        let mut vars = HashSet::new();
+        for clause in clauses.iter() {
+            for lit in clause.lits.iter() {
+                vars.insert(lit.var);
+            }
+        }
+        Self { clauses, vars }
+    }
+
     pub fn from_dimacs_cnf(content: &str) -> Self {
         let mut clauses = Clauses::default();
         for line in content.lines() {
@@ -160,11 +170,11 @@ impl Formula {
                 }
             }
         }
+        Self::new(clauses)
+    }
 
-        Formula {
-            clauses,
-            ..Default::default()
-        }
+    pub fn vars(&self) -> impl Iterator<Item = &Var> {
+        self.vars.iter()
     }
 
     pub fn add_learnt_clause(&mut self, clause: Clause) {
@@ -188,7 +198,6 @@ impl Formula {
     }
 }
 
-#[derive(Default)]
 pub struct Assignments {
     len: usize,
     curr_decision_level: u32,
@@ -198,6 +207,16 @@ pub struct Assignments {
 }
 
 impl Assignments {
+    pub fn new(size: usize) -> Self {
+        Self {
+            len: 0,
+            curr_decision_level: 0,
+            values: vec![None; size],
+            antecedents: vec![None; size],
+            decision_levels: vec![None; size],
+        }
+    }
+
     pub fn num_assigned_vars(&self) -> usize {
         self.len
     }
@@ -212,6 +231,10 @@ impl Assignments {
         } else {
             self.values[lit.var.0]
         }
+    }
+
+    pub fn value_var(&self, var: Var) -> Option<bool> {
+        self.values[var.0]
     }
 
     pub fn assign(&mut self, Var(var): Var, value: bool, antecedent: Option<ClauseIndex>) {
@@ -240,7 +263,7 @@ impl Assignments {
         self.decision_levels[var] = None;
     }
 
-    pub fn satisfy(&self, formula: Formula) -> bool {
+    pub fn satisfy(&self, formula: &Formula) -> bool {
         formula
             .clauses
             .iter()
@@ -259,7 +282,11 @@ impl Assignments {
 }
 
 pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
-    let mut assignments = Assignments::default();
+    let size = formula
+        .vars()
+        .max()
+        .map_or_else(|| formula.vars.len() + 1, |v| v.0 + 1);
+    let mut assignments = Assignments::new(size);
     match unit_propagation(formula, &mut assignments) {
         Reason::Conflict(_) => return None,
         Reason::Unresolved => {}
