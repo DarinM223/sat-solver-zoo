@@ -6,7 +6,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Var(usize);
 
 impl Display for Var {
@@ -15,7 +15,7 @@ impl Display for Var {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Lit {
     pub var: Var,
     pub neg: bool,
@@ -58,12 +58,16 @@ pub enum ClauseStatus {
     Unresolved,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Clause {
     lits: HashSet<Lit>,
 }
 
 impl Clause {
+    pub fn len(&self) -> usize {
+        self.lits.len()
+    }
+
     pub fn status(&self, assignments: &Assignments) -> ClauseStatus {
         let (count_false, any_true) = self.lits.iter().map(|lit| assignments.value(*lit)).fold(
             (0, false),
@@ -88,10 +92,14 @@ impl Clause {
 #[derive(Clone, Copy)]
 pub struct ClauseIndex(usize);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Clauses(Vec<Clause>);
 
 impl Clauses {
+    pub fn pop(&mut self) -> Option<Clause> {
+        self.0.pop()
+    }
+
     pub fn push(&mut self, clause: Clause) {
         self.0.push(clause);
     }
@@ -154,6 +162,7 @@ impl Formula {
 
     pub fn from_dimacs_cnf(content: &str) -> Self {
         let mut clauses = Clauses::default();
+        clauses.push(Clause::default());
         for line in content.lines() {
             let mut tokens = line.split_ascii_whitespace().peekable();
             // Ignore empty lines or lines starting with 'p' or 'c'.
@@ -169,6 +178,11 @@ impl Formula {
                     last.lits.insert(lit);
                 }
             }
+        }
+        if let Some(clause) = clauses.last()
+            && clause.len() == 0
+        {
+            clauses.pop();
         }
         Self::new(clauses)
     }
