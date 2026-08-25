@@ -1,6 +1,6 @@
 use rand::seq::IteratorRandom;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     hash::Hash,
     ops::{Index, IndexMut},
@@ -89,7 +89,15 @@ impl Clause {
     }
 }
 
-#[derive(Clone, Copy)]
+impl Hash for Clause {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for lit in self.lits.iter() {
+            lit.hash(state);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClauseIndex(usize);
 
 #[derive(Debug, Default)]
@@ -143,6 +151,42 @@ impl IndexMut<ClauseIndex> for Clauses {
     }
 }
 
+pub struct Watcher {
+    lit_to_clauses: HashMap<Lit, Vec<ClauseIndex>>,
+    clause_to_lits: HashMap<ClauseIndex, Vec<Lit>>,
+}
+
+impl Watcher {
+    pub fn new(formula: &Formula) -> Self {
+        let mut lit_to_clauses: HashMap<Lit, Vec<ClauseIndex>> = HashMap::new();
+        let mut clause_to_lits: HashMap<ClauseIndex, Vec<Lit>> = HashMap::new();
+        for (clause_idx, clause) in formula.iter_with_clause_indices() {
+            if clause.len() == 1 {
+                let key = clause.lits.iter().next().unwrap();
+                append_multimap(&mut lit_to_clauses, key, clause_idx);
+                append_multimap(&mut clause_to_lits, &clause_idx, *key);
+            } else {
+                let [lit1, lit2] = clause.lits.iter().take(2).cloned().collect::<Vec<_>>()[..]
+                else {
+                    panic!("Clause should have either 1 or 2 literals in it, unexpected");
+                };
+                append_multimap(&mut lit_to_clauses, &lit1, clause_idx);
+                append_multimap(&mut clause_to_lits, &clause_idx, lit1);
+                append_multimap(&mut lit_to_clauses, &lit2, clause_idx);
+                append_multimap(&mut clause_to_lits, &clause_idx, lit2);
+            }
+        }
+        Watcher {
+            lit_to_clauses,
+            clause_to_lits,
+        }
+    }
+}
+
+fn append_multimap<K: Eq + Hash, V>(map: &mut HashMap<K, Vec<V>>, k: &K, v: V) {
+    map.get_mut(k).get_or_insert(&mut Vec::new()).push(v);
+}
+
 #[derive(Default)]
 pub struct Formula {
     clauses: Clauses,
@@ -150,6 +194,13 @@ pub struct Formula {
 }
 
 impl Formula {
+    pub fn iter_with_clause_indices(&self) -> impl Iterator<Item = (ClauseIndex, &Clause)> {
+        self.clauses
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (ClauseIndex(i), e))
+    }
+
     pub fn new(clauses: Clauses) -> Self {
         let mut vars = HashSet::new();
         for clause in clauses.iter() {
