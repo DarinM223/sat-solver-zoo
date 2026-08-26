@@ -181,6 +181,50 @@ impl Watcher {
             clause_to_lits,
         }
     }
+
+    pub fn get_clauses(&self, lit: &Lit) -> impl Iterator<Item = ClauseIndex> + use<'_> {
+        self.lit_to_clauses
+            .get(lit)
+            .into_iter()
+            .flat_map(|nodes| nodes.iter().cloned())
+    }
+
+    pub fn get_lits(&self, clause_idx: ClauseIndex) -> impl Iterator<Item = Lit> {
+        self.clause_to_lits
+            .get(&clause_idx)
+            .into_iter()
+            .flat_map(|nodes| nodes.iter().cloned())
+    }
+
+    pub fn has_lit(&self, clause_idx: ClauseIndex, lit: &Lit) -> bool {
+        match self.clause_to_lits.get(&clause_idx) {
+            Some(clauses) => clauses.contains(lit),
+            None => false,
+        }
+    }
+
+    pub fn rewatch(&mut self, clause_idx: ClauseIndex, old: &Lit, new: &Lit) {
+        if let Some(lits) = self.clause_to_lits.get_mut(&clause_idx) {
+            if let Some(pos) = lits.iter().position(|x| x == old) {
+                lits.remove(pos);
+            }
+            lits.push(*new);
+        }
+        if let Some(clauses) = self.lit_to_clauses.get_mut(old)
+            && let Some(pos) = clauses.iter().position(|x| *x == clause_idx)
+        {
+            clauses.remove(pos);
+        }
+        self.lit_to_clauses
+            .get_mut(new)
+            .get_or_insert(&mut Vec::new())
+            .push(clause_idx);
+    }
+
+    pub fn add(&mut self, clause_idx: ClauseIndex, lit: &Lit) {
+        append_multimap(&mut self.clause_to_lits, &clause_idx, *lit);
+        append_multimap(&mut self.lit_to_clauses, lit, clause_idx);
+    }
 }
 
 fn append_multimap<K: Eq + Hash, V>(map: &mut HashMap<K, Vec<V>>, k: &K, v: V) {
@@ -240,10 +284,6 @@ impl Formula {
 
     pub fn vars(&self) -> impl Iterator<Item = &Var> {
         self.vars.iter()
-    }
-
-    pub fn add_learnt_clause(&mut self, clause: Clause) {
-        self.clauses.0.push(clause);
     }
 
     pub fn all_variables_assigned(&self, assignments: &Assignments) -> bool {
@@ -346,13 +386,21 @@ impl Assignments {
     }
 }
 
+pub fn add_learnt_clause(watcher: &mut Watcher, formula: &mut Formula, clause: Clause) {
+    formula.clauses.0.push(clause);
+    // TODO: add recently assigned literals to watcher
+}
+
 pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
+    let mut watcher = Watcher::new(formula);
+    let mut to_propagate = Vec::new();
     let size = formula
         .vars()
         .max()
         .map_or_else(|| formula.vars.len() + 1, |v| v.0 + 1);
     let mut assignments = Assignments::new(size);
-    match unit_propagation(formula, &mut assignments) {
+
+    match unit_propagation(&mut watcher, formula, &mut assignments, &mut to_propagate) {
         Reason::Conflict(_) => return None,
         Reason::Unresolved => {}
     };
@@ -362,14 +410,19 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
         assignments.curr_decision_level += 1;
         assignments.assign(var, val, None);
         loop {
-            let clause = match unit_propagation(formula, &mut assignments) {
+            let clause = match unit_propagation(
+                &mut watcher,
+                formula,
+                &mut assignments,
+                &mut to_propagate,
+            ) {
                 Reason::Conflict(clause_index) => clause_index,
                 Reason::Unresolved => break,
             };
 
             let (backtrack_level, clause) =
                 conflict_analysis(formula, formula.clauses.get(clause).unwrap(), &assignments)?;
-            formula.add_learnt_clause(clause);
+            add_learnt_clause(&mut watcher, formula, clause);
             assignments.backtrack(backtrack_level);
             assignments.curr_decision_level = backtrack_level;
         }
@@ -383,25 +436,47 @@ pub enum Reason {
     Unresolved,
 }
 
-pub fn unit_propagation(formula: &Formula, assignments: &mut Assignments) -> Reason {
-    // finish is set to true when no unit and conflict clause is found.
-    let mut finish = false;
-    while !finish {
-        finish = true;
-        for (clause_idx, clause) in formula.clauses.iter().enumerate() {
-            let clause_idx = ClauseIndex(clause_idx);
-            match clause.status(assignments) {
-                ClauseStatus::Unresolved | ClauseStatus::Satisfied => continue,
-                ClauseStatus::Unit => {
-                    let lit = clause
-                        .lits
-                        .iter()
-                        .find(|lit| assignments.values[lit.var.0].is_none())
-                        .unwrap();
-                    assignments.assign(lit.var, !lit.neg, Some(clause_idx));
-                    finish = false;
+pub fn unit_propagation(
+    watcher: &mut Watcher,
+    formula: &Formula,
+    assignments: &mut Assignments,
+    to_propagate: &mut Vec<Lit>,
+) -> Reason {
+    while let Some(ref watching_lit) = to_propagate.pop().map(|lit| lit.neg()) {
+        // Collect into a Vec to avoid the lifetime conflict with rewatch.
+        let watching_clauses = watcher.get_clauses(watching_lit).collect::<Vec<_>>();
+        for watching_clause in watching_clauses {
+            let mut found_rewatch = false;
+            for lit in formula.clauses.get(watching_clause).unwrap().lits.iter() {
+                if watcher.has_lit(watching_clause, lit) {
+                    continue;
+                } else if assignments.value(*lit) == Some(false) {
+                    continue;
                 }
-                ClauseStatus::Unsatisfied => return Reason::Conflict(clause_idx),
+
+                found_rewatch = true;
+                watcher.rewatch(watching_clause, watching_lit, lit);
+                break;
+            }
+            if !found_rewatch {
+                let watching_lits = watcher.get_lits(watching_clause).collect::<Vec<_>>();
+                if watching_lits.len() == 1 {
+                    return Reason::Conflict(watching_clause);
+                }
+                let other = if watching_lits[1] == *watching_lit {
+                    watching_lits[0]
+                } else {
+                    watching_lits[1]
+                };
+
+                if !assignments.contains_var(other.var) {
+                    assignments.assign(other.var, !other.neg, Some(watching_clause));
+                    to_propagate.push(other);
+                } else if assignments.value(other) == Some(true) {
+                    continue;
+                } else {
+                    return Reason::Conflict(watching_clause);
+                }
             }
         }
     }
