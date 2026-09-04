@@ -386,9 +386,29 @@ impl Assignments {
     }
 }
 
-pub fn add_learnt_clause(watcher: &mut Watcher, formula: &mut Formula, clause: Clause) {
+pub fn add_learnt_clause(
+    watcher: &mut Watcher,
+    formula: &mut Formula,
+    clause: Clause,
+    assignments: &Assignments,
+) -> ClauseIndex {
+    let mut lits = clause.lits.iter().cloned().collect::<Vec<_>>();
     formula.clauses.0.push(clause);
-    // TODO: add recently assigned literals to watcher
+
+    // add recently assigned literals to watcher
+    lits.sort_by(|lit1, lit2| {
+        let v1 = assignments.decision_level(lit1.var);
+        let v2 = assignments.decision_level(lit2.var);
+        v1.cmp(&v2).reverse()
+    });
+    let clause_idx = ClauseIndex(formula.clauses.0.len() - 1);
+    for lit in lits {
+        if watcher.get_lits(clause_idx).count() >= 2 {
+            break;
+        }
+        watcher.add(clause_idx, &lit);
+    }
+    clause_idx
 }
 
 pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
@@ -400,16 +420,31 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
         .map_or_else(|| formula.vars.len() + 1, |v| v.0 + 1);
     let mut assignments = Assignments::new(size);
 
+    for (clause_idx, clause) in formula
+        .iter_with_clause_indices()
+        .filter(|(_, clause)| clause.len() == 1)
+    {
+        let lit = clause.lits.iter().next().unwrap();
+        if assignments.contains_var(lit.var) {
+            assignments.assign(lit.var, !lit.neg, Some(clause_idx));
+            to_propagate.push(*lit);
+        }
+    }
+
     match unit_propagation(&mut watcher, formula, &mut assignments, &mut to_propagate) {
         Reason::Conflict(_) => return None,
         Reason::Unresolved => {}
     };
 
     while !formula.all_variables_assigned(&assignments) {
-        let (var, val) = formula.pick_branching_variable(&assignments);
+        let (mut var, mut val) = formula.pick_branching_variable(&assignments);
+        let mut learnt_clause = None;
         assignments.curr_decision_level += 1;
-        assignments.assign(var, val, None);
         loop {
+            assignments.assign(var, val, learnt_clause);
+            to_propagate.clear();
+            to_propagate.push(Lit { var, neg: !val });
+
             let clause = match unit_propagation(
                 &mut watcher,
                 formula,
@@ -422,9 +457,23 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
 
             let (backtrack_level, clause) =
                 conflict_analysis(formula, formula.clauses.get(clause).unwrap(), &assignments)?;
-            add_learnt_clause(&mut watcher, formula, clause);
+            let next_unit_literal = *clause
+                .lits
+                .iter()
+                .filter(|lit| !assignments.contains_var(lit.var))
+                .next()
+                .expect("Learned clause must be a unit clause");
+            learnt_clause = Some(add_learnt_clause(
+                &mut watcher,
+                formula,
+                clause,
+                &assignments,
+            ));
             assignments.backtrack(backtrack_level);
             assignments.curr_decision_level = backtrack_level;
+
+            // Learned clause must be a unit clause, so run unit propagation again.
+            (var, val) = (next_unit_literal.var, !next_unit_literal.neg);
         }
     }
 
