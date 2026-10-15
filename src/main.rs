@@ -1,8 +1,9 @@
 use std::{error::Error, fs::File, io::Read};
 
-use crate::cdcl::{Formula, cdcl_solve};
+use crate::{cdcl::cdcl_solve, types::Formula};
 
 mod cdcl;
+mod types;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args();
