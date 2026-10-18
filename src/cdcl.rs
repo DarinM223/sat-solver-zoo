@@ -16,18 +16,17 @@ impl Watcher {
         let mut clause_to_lits: HashMap<ClauseIndex, Vec<Lit>> = HashMap::new();
         for (clause_idx, clause) in formula.clauses.iter_with_clause_indices() {
             if clause.len() == 1 {
-                let key = clause.lits.iter().next().unwrap();
-                append_multimap(&mut lit_to_clauses, key, clause_idx);
-                append_multimap(&mut clause_to_lits, &clause_idx, *key);
+                let key = clause.iter().next().unwrap();
+                append_multimap(&mut lit_to_clauses, key.clone(), clause_idx);
+                append_multimap(&mut clause_to_lits, clause_idx, *key);
             } else {
-                let [lit1, lit2] = clause.lits.iter().take(2).cloned().collect::<Vec<_>>()[..]
-                else {
+                let [lit1, lit2] = clause.iter().take(2).cloned().collect::<Vec<_>>()[..] else {
                     panic!("Clause should have either 1 or 2 literals in it, unexpected");
                 };
-                append_multimap(&mut lit_to_clauses, &lit1, clause_idx);
-                append_multimap(&mut clause_to_lits, &clause_idx, lit1);
-                append_multimap(&mut lit_to_clauses, &lit2, clause_idx);
-                append_multimap(&mut clause_to_lits, &clause_idx, lit2);
+                append_multimap(&mut lit_to_clauses, lit1, clause_idx);
+                append_multimap(&mut clause_to_lits, clause_idx, lit1);
+                append_multimap(&mut lit_to_clauses, lit2, clause_idx);
+                append_multimap(&mut clause_to_lits, clause_idx, lit2);
             }
         }
         Watcher {
@@ -75,22 +74,21 @@ impl Watcher {
             .push(clause_idx);
     }
 
-    pub fn add(&mut self, clause_idx: ClauseIndex, lit: &Lit) {
-        append_multimap(&mut self.clause_to_lits, &clause_idx, *lit);
+    pub fn add(&mut self, clause_idx: ClauseIndex, lit: Lit) {
+        append_multimap(&mut self.clause_to_lits, clause_idx, lit);
         append_multimap(&mut self.lit_to_clauses, lit, clause_idx);
     }
 }
 
-fn append_multimap<K: Eq + Hash, V>(map: &mut HashMap<K, Vec<V>>, k: &K, v: V) {
-    map.get_mut(k).get_or_insert(&mut Vec::new()).push(v);
+fn append_multimap<K: Clone + Eq + Hash, V>(map: &mut HashMap<K, Vec<V>>, k: K, v: V) {
+    map.entry(k).or_default().push(v);
 }
 
 impl Formula {
     pub fn pick_branching_variable(&self, assignments: &Assignments) -> (Var, bool) {
         let mut rng = rand::rng();
         let var = self
-            .vars
-            .iter()
+            .vars()
             .filter(|&&var| !assignments.contains_var(var))
             .choose(&mut rng)
             .expect("No unassigned variable");
@@ -127,7 +125,7 @@ pub fn add_learnt_clause(
         if watcher.get_lits(clause_idx).count() >= 2 {
             break;
         }
-        watcher.add(clause_idx, &lit);
+        watcher.add(clause_idx, lit);
     }
     clause_idx
 }
@@ -247,11 +245,16 @@ pub fn unit_propagation(
 }
 
 pub fn resolve(a: &Clause, b: &Clause, var: Var) -> Clause {
-    // `|` is set union, `-` is set difference
-    Clause {
-        lits: &(&a.lits | &b.lits)
-            - &HashSet::from([Lit { var, neg: true }, Lit { var, neg: false }]),
+    let mut seen = HashSet::with_capacity(a.len() + b.len());
+    let mut lits = Vec::with_capacity(a.len() + b.len());
+
+    for &lit in a.iter().chain(b.iter()) {
+        if lit.var != var && seen.insert(lit) {
+            lits.push(lit);
+        }
     }
+
+    Clause::from_lits(lits)
 }
 
 /// Returns backtrack level and resolved clause.
@@ -267,14 +270,26 @@ pub fn conflict_analysis(
         |lit: &&Lit| assignments.decision_level(lit.var) == Some(assignments.curr_decision_level);
 
     let mut clause = clause.clone();
-    let mut literals = clause.lits.iter().filter(only_curr_decision_level);
-    while literals.clone().count() != 1 {
-        let lit = literals
-            .find(|lit| assignments.antecedent(lit.var).is_some())
+    loop {
+        let (count, pivot) = clause.iter().filter(only_curr_decision_level).fold(
+            (0, None),
+            |(count, pivot), lit| {
+                (
+                    count + 1,
+                    pivot.or_else(|| {
+                        assignments
+                            .antecedent(lit.var)
+                            .map(|antecedent| (lit, antecedent))
+                    }),
+                )
+            },
+        );
+        if count == 1 {
+            break;
+        }
+        let (lit, antecedent) = pivot
             .expect("Couldn't find a variable in the current decision level with an antecedent");
-        let antecedent = assignments.antecedent(lit.var).unwrap();
         clause = resolve(&clause, formula.clauses.get(antecedent).unwrap(), lit.var);
-        literals = clause.lits.iter().filter(only_curr_decision_level);
     }
 
     let mut decision_levels = clause

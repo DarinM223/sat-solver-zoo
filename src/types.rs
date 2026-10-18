@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     fmt::Display,
     hash::Hash,
     ops::{Index, IndexMut},
@@ -59,11 +58,15 @@ pub enum ClauseStatus {
 
 #[derive(Debug, Clone, Default)]
 pub struct Clause {
-    pub lits: HashSet<Lit>,
+    lits: Vec<Lit>,
 }
 
 impl Clause {
-    pub fn iter(&self) -> impl Iterator<Item = &Lit> + Clone {
+    pub fn from_lits(lits: Vec<Lit>) -> Clause {
+        Clause { lits }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Lit> + Clone + '_ {
         self.lits.iter()
     }
 
@@ -72,7 +75,7 @@ impl Clause {
     }
 
     pub fn add_lit(&mut self, lit: Lit) {
-        self.lits.insert(lit);
+        self.lits.push(lit);
     }
 
     pub fn status(&self, assignments: &Assignments) -> ClauseStatus {
@@ -242,17 +245,17 @@ impl Assignments {
 #[derive(Default)]
 pub struct Formula {
     pub clauses: Clauses,
-    pub vars: HashSet<Var>,
+    vars: Vec<Var>,
 }
 
 impl Formula {
     pub fn new(clauses: Clauses) -> Self {
-        let mut vars = HashSet::new();
-        for clause in clauses.iter() {
-            for lit in clause.iter() {
-                vars.insert(lit.var);
-            }
-        }
+        let mut vars = clauses
+            .iter()
+            .flat_map(|clause| clause.iter().map(|lit| lit.var))
+            .collect::<Vec<_>>();
+        vars.sort_unstable();
+        vars.dedup();
         Self { clauses, vars }
     }
 
