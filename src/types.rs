@@ -62,8 +62,8 @@ pub struct Clause {
 }
 
 impl Clause {
-    pub fn from_lits(lits: Vec<Lit>) -> Clause {
-        Clause { lits }
+    pub fn from_unique_lits(lits: Vec<Lit>) -> Self {
+        Self { lits }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Lit> + Clone + '_ {
@@ -75,7 +75,9 @@ impl Clause {
     }
 
     pub fn add_lit(&mut self, lit: Lit) {
-        self.lits.push(lit);
+        if !self.lits.contains(&lit) {
+            self.lits.push(lit);
+        }
     }
 
     pub fn status(&self, assignments: &Assignments) -> ClauseStatus {

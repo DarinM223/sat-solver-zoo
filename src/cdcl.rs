@@ -11,17 +11,18 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub fn new(formula: &Formula) -> Self {
+    pub fn new(formula: &Formula) -> Option<Self> {
         let mut lit_to_clauses: HashMap<Lit, Vec<ClauseIndex>> = HashMap::new();
         let mut clause_to_lits: HashMap<ClauseIndex, Vec<Lit>> = HashMap::new();
         for (clause_idx, clause) in formula.clauses.iter_with_clause_indices() {
             if clause.len() == 1 {
                 let key = clause.iter().next().unwrap();
-                append_multimap(&mut lit_to_clauses, key.clone(), clause_idx);
+                append_multimap(&mut lit_to_clauses, *key, clause_idx);
                 append_multimap(&mut clause_to_lits, clause_idx, *key);
             } else {
                 let [lit1, lit2] = clause.iter().take(2).cloned().collect::<Vec<_>>()[..] else {
-                    panic!("Clause should have either 1 or 2 literals in it, unexpected");
+                    // Expect at least one or two literals in clause.
+                    return None;
                 };
                 append_multimap(&mut lit_to_clauses, lit1, clause_idx);
                 append_multimap(&mut clause_to_lits, clause_idx, lit1);
@@ -29,10 +30,10 @@ impl Watcher {
                 append_multimap(&mut clause_to_lits, clause_idx, lit2);
             }
         }
-        Watcher {
+        Some(Watcher {
             lit_to_clauses,
             clause_to_lits,
-        }
+        })
     }
 
     pub fn get_clauses(&self, lit: &Lit) -> impl Iterator<Item = ClauseIndex> + use<'_> {
@@ -131,8 +132,8 @@ pub fn add_learnt_clause(
 }
 
 pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
-    let mut watcher = Watcher::new(formula);
     let mut to_propagate = Vec::new();
+    let mut watcher = Watcher::new(formula)?;
     let mut assignments = Assignments::new(formula.max_var_size());
 
     for (clause_idx, clause) in formula
@@ -173,18 +174,16 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
 
             let (backtrack_level, clause) =
                 conflict_analysis(formula, formula.clauses.get(clause).unwrap(), &assignments)?;
-            let next_unit_literal = *clause
+
+            let clause = add_learnt_clause(&mut watcher, formula, clause, &assignments);
+            learnt_clause = Some(clause);
+            assignments.backtrack(backtrack_level);
+            assignments.curr_decision_level = backtrack_level;
+
+            let next_unit_literal = formula.clauses[clause]
                 .iter()
                 .find(|lit| !assignments.contains_var(lit.var))
                 .expect("Learned clause must be a unit clause");
-            learnt_clause = Some(add_learnt_clause(
-                &mut watcher,
-                formula,
-                clause,
-                &assignments,
-            ));
-            assignments.backtrack(backtrack_level);
-            assignments.curr_decision_level = backtrack_level;
 
             // Learned clause must be a unit clause, so run unit propagation again.
             (var, val) = (next_unit_literal.var, !next_unit_literal.neg);
@@ -254,7 +253,7 @@ pub fn resolve(a: &Clause, b: &Clause, var: Var) -> Clause {
         }
     }
 
-    Clause::from_lits(lits)
+    Clause::from_unique_lits(lits)
 }
 
 /// Returns backtrack level and resolved clause.
@@ -289,7 +288,7 @@ pub fn conflict_analysis(
         }
         let (lit, antecedent) = pivot
             .expect("Couldn't find a variable in the current decision level with an antecedent");
-        clause = resolve(&clause, formula.clauses.get(antecedent).unwrap(), lit.var);
+        clause = resolve(&clause, &formula.clauses[antecedent], lit.var);
     }
 
     let mut decision_levels = clause
@@ -301,5 +300,99 @@ pub fn conflict_analysis(
         Some((0, clause))
     } else {
         Some((decision_levels[decision_levels.len() - 2], clause))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_sat(input: &str) {
+        let mut formula = Formula::from_dimacs_cnf(input);
+        let assignments =
+            cdcl_solve(&mut formula).unwrap_or_else(|| panic!("expected SAT:\n{input}"));
+        assert!(
+            assignments.satisfy(&formula),
+            "solver returned an assignment that does not satisfy:\n{input}"
+        );
+    }
+
+    fn assert_unsat(input: &str) {
+        let mut formula = Formula::from_dimacs_cnf(input);
+        assert!(
+            cdcl_solve(&mut formula).is_none(),
+            "expected UNSAT:\n{input}"
+        );
+    }
+
+    #[test]
+    fn empty_formula_is_sat() {
+        assert_sat("p cnf 0 0\n");
+    }
+
+    #[test]
+    fn empty_clause_is_unsat() {
+        // A zero immediately ends a clause, making this one empty.
+        assert_unsat("p cnf 0 1\n0\n");
+    }
+
+    #[test]
+    fn unit_clause_forces_its_literal() {
+        let mut formula = Formula::from_dimacs_cnf("p cnf 1 1\n1 0\n");
+        let assignments = cdcl_solve(&mut formula).expect("expected SAT");
+
+        assert_eq!(assignments.value(Lit::from_int(1)), Some(true));
+        assert!(assignments.satisfy(&formula));
+    }
+
+    #[test]
+    fn contradictory_unit_clauses_are_unsat() {
+        assert_unsat("p cnf 1 2\n1 0\n-1 0\n");
+    }
+
+    #[test]
+    fn unit_propagation_chain_is_satisfied() {
+        // 1 forces 2, which forces 3.
+        let mut formula = Formula::from_dimacs_cnf("p cnf 3 3\n1 0\n-1 2 0\n-2 3 0\n");
+        let assignments = cdcl_solve(&mut formula).expect("expected SAT");
+
+        assert_eq!(assignments.value(Lit::from_int(1)), Some(true));
+        assert_eq!(assignments.value(Lit::from_int(2)), Some(true));
+        assert_eq!(assignments.value(Lit::from_int(3)), Some(true));
+        assert!(assignments.satisfy(&formula));
+    }
+
+    #[test]
+    fn propagation_detects_conflicting_units() {
+        // 1 forces 2, while the final clause requires 2 to be false.
+        assert_unsat("p cnf 2 3\n1 0\n-1 2 0\n-2 0\n");
+    }
+
+    #[test]
+    fn clauses_can_span_lines_and_comments_are_ignored() {
+        let input = "c a comment\np cnf 2 2\n1\n-2 0\n2 0\n";
+        assert_sat(input);
+    }
+
+    #[test]
+    fn tautological_clause_is_satisfiable() {
+        assert_sat("p cnf 1 1\n1 -1 0\n");
+    }
+
+    #[test]
+    fn duplicate_literal_clause_is_satisfiable() {
+        assert_sat("p cnf 1 1\n1 1 0\n");
+    }
+
+    #[test]
+    fn conflicting_clauses_exercise_learning_and_backtracking() {
+        // These four clauses exclude all four assignments to variables 1 and 2.
+        assert_unsat(
+            "p cnf 2 4\n\
+             1 2 0\n\
+             -1 2 0\n\
+             1 -2 0\n\
+             -1 -2 0\n",
+        );
     }
 }
