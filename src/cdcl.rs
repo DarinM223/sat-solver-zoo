@@ -70,8 +70,8 @@ impl Watcher {
             clauses.remove(pos);
         }
         self.lit_to_clauses
-            .get_mut(new)
-            .get_or_insert(&mut Vec::new())
+            .entry(*new)
+            .or_default()
             .push(clause_idx);
     }
 
@@ -142,7 +142,7 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
         .filter(|(_, clause)| clause.len() == 1)
     {
         let lit = clause.iter().next().unwrap();
-        if assignments.contains_var(lit.var) {
+        if !assignments.contains_var(lit.var) {
             assignments.assign(lit.var, !lit.neg, Some(clause_idx));
             to_propagate.push(*lit);
         }
@@ -394,5 +394,74 @@ mod tests {
              1 -2 0\n\
              -1 -2 0\n",
         );
+    }
+
+    #[test]
+    fn root_level_unit_clause_is_assigned_at_level_zero() {
+        let mut formula = Formula::from_dimacs_cnf("p cnf 1 1\n-1 0\n");
+        let assignments = cdcl_solve(&mut formula).expect("expected SAT");
+        let unit = Lit::from_int(-1);
+
+        assert_eq!(assignments.value(unit), Some(true));
+        assert_eq!(assignments.decision_level(unit.var), Some(0));
+        assert!(assignments.antecedent(unit.var).is_some());
+    }
+
+    #[test]
+    fn backtracking_keeps_assignments_at_the_target_level() {
+        let mut assignments = Assignments::new(3);
+        let x1 = Lit::from_int(1).var;
+        let x2 = Lit::from_int(2).var;
+
+        assignments.curr_decision_level = 1;
+        assignments.assign(x1, true, None);
+        assignments.curr_decision_level = 2;
+        assignments.assign(x2, false, None);
+
+        assignments.backtrack(1);
+
+        assert_eq!(assignments.value_var(x1), Some(true));
+        assert_eq!(assignments.value_var(x2), None);
+        assert_eq!(assignments.num_assigned_vars(), 1);
+    }
+
+    #[test]
+    fn rewatch_moves_a_literal_watch_without_affecting_other_clauses() {
+        let formula = Formula::from_dimacs_cnf(
+            "p cnf 4 2\n\
+             1 2 3 0\n\
+             1 4 0\n",
+        );
+        let mut watcher = Watcher::new(&formula).expect("formula has no empty clauses");
+        let mut clauses = formula.clauses.iter_with_clause_indices();
+        let (first_clause, _) = clauses.next().unwrap();
+        let (second_clause, _) = clauses.next().unwrap();
+
+        let one = Lit::from_int(1);
+        let two = Lit::from_int(2);
+        let three = Lit::from_int(3);
+
+        assert!(watcher.has_lit(first_clause, &one));
+        assert!(watcher.has_lit(first_clause, &two));
+
+        watcher.rewatch(first_clause, &one, &three);
+
+        assert!(!watcher.has_lit(first_clause, &one));
+        assert!(watcher.has_lit(first_clause, &three));
+        assert!(watcher.has_lit(second_clause, &one));
+        assert!(watcher.get_clauses(&one).any(|idx| idx == second_clause));
+        assert!(watcher.get_clauses(&three).any(|idx| idx == first_clause));
+    }
+
+    #[test]
+    fn resolution_removes_the_pivot_and_deduplicates_literals() {
+        let a = Clause::from_unique_lits(vec![Lit::from_int(1), Lit::from_int(-2)]);
+        let b =
+            Clause::from_unique_lits(vec![Lit::from_int(-1), Lit::from_int(3), Lit::from_int(-2)]);
+
+        let resolved = resolve(&a, &b, Lit::from_int(1).var);
+        let literals = resolved.iter().copied().collect::<Vec<_>>();
+
+        assert_eq!(literals, vec![Lit::from_int(-2), Lit::from_int(3)]);
     }
 }
