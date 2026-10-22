@@ -49,6 +49,55 @@ impl Display for Lit {
     }
 }
 
+pub struct LitStore<Value> {
+    lits: Vec<Value>,
+}
+
+impl<Value: Default + Clone> LitStore<Value> {
+    pub fn new(num_lits: usize) -> Self {
+        Self {
+            lits: Vec::with_capacity(num_lits * 2),
+        }
+    }
+
+    pub fn preallocated(num_lits: usize) -> Self {
+        Self {
+            lits: vec![Default::default(); num_lits * 2],
+        }
+    }
+
+    pub fn get(&self, index: &Lit) -> Option<&Value> {
+        self.lits
+            .get((index.var.0 - 1) * 2 + if index.neg { 1 } else { 0 })
+    }
+
+    pub fn get_mut(&mut self, index: &Lit) -> Option<&mut Value> {
+        self.lits
+            .get_mut((index.var.0 - 1) * 2 + if index.neg { 1 } else { 0 })
+    }
+
+    pub fn push(&mut self) -> Lit {
+        self.lits.push(Default::default());
+        let var = Var(self.lits.len());
+        self.lits.push(Default::default());
+        Lit { var, neg: false }
+    }
+}
+
+impl<Value> Index<Lit> for LitStore<Value> {
+    type Output = Value;
+
+    fn index(&self, index: Lit) -> &Self::Output {
+        &self.lits[(index.var.0 - 1) * 2 + if index.neg { 1 } else { 0 }]
+    }
+}
+
+impl<Value> IndexMut<Lit> for LitStore<Value> {
+    fn index_mut(&mut self, index: Lit) -> &mut Self::Output {
+        &mut self.lits[(index.var.0 - 1) * 2 + if index.neg { 1 } else { 0 }]
+    }
+}
+
 pub enum ClauseStatus {
     Satisfied,
     Unsatisfied,
@@ -101,72 +150,80 @@ impl Clause {
     }
 }
 
-impl Hash for Clause {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        for lit in self.lits.iter() {
-            lit.hash(state);
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClauseIndex(usize);
 
 #[derive(Debug, Default)]
-pub struct Clauses(Vec<Clause>);
+pub struct ClauseStore<Value>(Vec<Value>);
 
-impl Clauses {
-    pub fn pop(&mut self) -> Option<Clause> {
+impl<Value> ClauseStore<Value> {
+    pub fn new(num_clauses: usize) -> Self {
+        Self(Vec::with_capacity(num_clauses))
+    }
+
+    pub fn pop(&mut self) -> Option<Value> {
         self.0.pop()
     }
 
-    pub fn push(&mut self, clause: Clause) -> ClauseIndex {
+    pub fn push(&mut self, clause: Value) -> ClauseIndex {
         self.0.push(clause);
         ClauseIndex(self.0.len() - 1)
     }
 
-    pub fn last(&self) -> Option<&Clause> {
+    pub fn last(&self) -> Option<&Value> {
         self.0.last()
     }
 
-    pub fn last_mut(&mut self) -> Option<&mut Clause> {
+    pub fn last_mut(&mut self) -> Option<&mut Value> {
         self.0.last_mut()
     }
 
-    pub fn get(&self, ClauseIndex(i): ClauseIndex) -> Option<&Clause> {
+    pub fn get(&self, &ClauseIndex(i): &ClauseIndex) -> Option<&Value> {
         self.0.get(i)
     }
 
-    pub fn get_mut(&mut self, ClauseIndex(i): ClauseIndex) -> Option<&mut Clause> {
+    pub fn get_mut(&mut self, &ClauseIndex(i): &ClauseIndex) -> Option<&mut Value> {
         self.0.get_mut(i)
     }
 
-    pub fn iter_with_clause_indices(&self) -> impl Iterator<Item = (ClauseIndex, &Clause)> {
+    pub fn iter_with_clause_indices(&self) -> impl Iterator<Item = (ClauseIndex, &Value)> {
         self.0.iter().enumerate().map(|(i, e)| (ClauseIndex(i), e))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Clause> {
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.0.iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Clause> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Value> {
         self.0.iter_mut()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
-impl Index<ClauseIndex> for Clauses {
-    type Output = Clause;
+impl<Value: Clone + Default> ClauseStore<Value> {
+    pub fn preallocated(num_clauses: usize) -> Self {
+        Self(vec![Default::default(); num_clauses])
+    }
+}
+
+impl<Value> Index<ClauseIndex> for ClauseStore<Value> {
+    type Output = Value;
 
     fn index(&self, index: ClauseIndex) -> &Self::Output {
         &self.0[index.0]
     }
 }
 
-impl IndexMut<ClauseIndex> for Clauses {
+impl<Value> IndexMut<ClauseIndex> for ClauseStore<Value> {
     fn index_mut(&mut self, index: ClauseIndex) -> &mut Self::Output {
         &mut self.0[index.0]
     }
 }
+
+pub type Clauses = ClauseStore<Clause>;
 
 pub struct Assignments {
     pub curr_decision_level: u32,

@@ -1,33 +1,60 @@
-use crate::types::{Assignments, Clause, ClauseIndex, Formula, Lit, Var};
+use crate::types::{Assignments, Clause, ClauseIndex, ClauseStore, Formula, Lit, LitStore, Var};
 use rand::seq::IteratorRandom;
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-};
+use std::collections::HashSet;
+
+pub trait Append<K, V> {
+    fn append(&mut self, k: K, v: V);
+}
+
+impl Append<Lit, ClauseIndex> for LitStore<Vec<ClauseIndex>> {
+    fn append(&mut self, k: Lit, v: ClauseIndex) {
+        match self.get_mut(&k) {
+            Some(clauses) => clauses.push(v),
+            None => {
+                self.push();
+                self.append(k, v);
+            }
+        }
+    }
+}
+
+impl Append<ClauseIndex, Lit> for ClauseStore<Vec<Lit>> {
+    fn append(&mut self, k: ClauseIndex, v: Lit) {
+        match self.get_mut(&k) {
+            Some(lits) => lits.push(v),
+            None => {
+                self.push(Vec::new());
+                self.append(k, v);
+            }
+        }
+    }
+}
 
 pub struct Watcher {
-    lit_to_clauses: HashMap<Lit, Vec<ClauseIndex>>,
-    clause_to_lits: HashMap<ClauseIndex, Vec<Lit>>,
+    lit_to_clauses: LitStore<Vec<ClauseIndex>>,
+    clause_to_lits: ClauseStore<Vec<Lit>>,
 }
 
 impl Watcher {
     pub fn new(formula: &Formula) -> Option<Self> {
-        let mut lit_to_clauses: HashMap<Lit, Vec<ClauseIndex>> = HashMap::new();
-        let mut clause_to_lits: HashMap<ClauseIndex, Vec<Lit>> = HashMap::new();
+        let mut lit_to_clauses: LitStore<Vec<ClauseIndex>> =
+            LitStore::preallocated(formula.max_var_size());
+        let mut clause_to_lits: ClauseStore<Vec<Lit>> =
+            ClauseStore::preallocated(formula.clauses.len());
         for (clause_idx, clause) in formula.clauses.iter_with_clause_indices() {
             if clause.len() == 1 {
                 let key = clause.iter().next().unwrap();
-                append_multimap(&mut lit_to_clauses, *key, clause_idx);
-                append_multimap(&mut clause_to_lits, clause_idx, *key);
+                lit_to_clauses.append(*key, clause_idx);
+                clause_to_lits.append(clause_idx, *key);
             } else {
                 let [lit1, lit2] = clause.iter().take(2).cloned().collect::<Vec<_>>()[..] else {
                     // Expect at least one or two literals in clause.
                     return None;
                 };
-                append_multimap(&mut lit_to_clauses, lit1, clause_idx);
-                append_multimap(&mut clause_to_lits, clause_idx, lit1);
-                append_multimap(&mut lit_to_clauses, lit2, clause_idx);
-                append_multimap(&mut clause_to_lits, clause_idx, lit2);
+                lit_to_clauses.append(lit1, clause_idx);
+                clause_to_lits.append(clause_idx, lit1);
+                lit_to_clauses.append(lit2, clause_idx);
+                clause_to_lits.append(clause_idx, lit2);
             }
         }
         Some(Watcher {
@@ -69,20 +96,13 @@ impl Watcher {
         {
             clauses.remove(pos);
         }
-        self.lit_to_clauses
-            .entry(*new)
-            .or_default()
-            .push(clause_idx);
+        self.lit_to_clauses.append(*new, clause_idx);
     }
 
     pub fn add(&mut self, clause_idx: ClauseIndex, lit: Lit) {
-        append_multimap(&mut self.clause_to_lits, clause_idx, lit);
-        append_multimap(&mut self.lit_to_clauses, lit, clause_idx);
+        self.clause_to_lits.append(clause_idx, lit);
+        self.lit_to_clauses.append(lit, clause_idx);
     }
-}
-
-fn append_multimap<K: Clone + Eq + Hash, V>(map: &mut HashMap<K, Vec<V>>, k: K, v: V) {
-    map.entry(k).or_default().push(v);
 }
 
 impl Formula {
@@ -173,7 +193,7 @@ pub fn cdcl_solve(formula: &mut Formula) -> Option<Assignments> {
             };
 
             let (backtrack_level, clause) =
-                conflict_analysis(formula, formula.clauses.get(clause).unwrap(), &assignments)?;
+                conflict_analysis(formula, formula.clauses.get(&clause).unwrap(), &assignments)?;
 
             let clause = add_learnt_clause(&mut watcher, formula, clause, &assignments);
             learnt_clause = Some(clause);
@@ -209,7 +229,7 @@ pub fn unit_propagation(
         let watching_clauses = watcher.get_clauses(watching_lit).collect::<Vec<_>>();
         for watching_clause in watching_clauses {
             let mut found_rewatch = false;
-            for lit in formula.clauses.get(watching_clause).unwrap().iter() {
+            for lit in formula.clauses.get(&watching_clause).unwrap().iter() {
                 if watcher.has_lit(watching_clause, lit) || assignments.value(*lit) == Some(false) {
                     continue;
                 }
